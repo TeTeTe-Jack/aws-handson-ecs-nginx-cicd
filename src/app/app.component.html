@@ -1,0 +1,20 @@
+<header class="site-header">
+  <div class="container">
+    <h1 class="logo">ECS＋nginx デモサイト</h1>
+    <nav class="nav">
+      <a routerLink="" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Home</a>
+      <a routerLink="about" routerLinkActive="active">About</a>
+      <a routerLink="contact" routerLinkActive="active">Contact</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+  <router-outlet />
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <small>© {{ year }} TeTeTe-Jack</small>
+  </div>
+</footer>

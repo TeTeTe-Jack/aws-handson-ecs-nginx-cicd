@@ -1,0 +1,80 @@
+:root {
+  --bg: #f7f7fb;
+  --paper: #ffffff;
+  --ink: #222;
+  --muted: #666;
+  --accent: #3b82f6; // ブルー系
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, sans-serif;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.site-header {
+  background: var(--paper);
+  border-bottom: 1px solid #eaeaea;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+
+  .container {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 12px 16px;
+  }
+
+  .logo {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+  }
+
+  .nav {
+    display: flex;
+    gap: 12px;
+    a {
+      color: var(--muted);
+      text-decoration: none;
+      padding: 6px 10px;
+      border-radius: 8px;
+
+      &.active, &:hover {
+        color: #fff;
+        background: var(--accent);
+      }
+    }
+  }
+}
+
+main.container {
+  padding: 24px 16px;
+}
+
+.card {
+  background: var(--paper);
+  border: 1px solid #eee;
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.03);
+}
+
+.site-footer {
+  border-top: 1px solid #eaeaea;
+  background: var(--paper);
+  margin-top: 48px;
+  .container { padding: 16px; }
+  small { color: var(--muted); }
+}
