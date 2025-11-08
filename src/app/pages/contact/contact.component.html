@@ -1,0 +1,35 @@
+<section class="card">
+  <h2>Contact</h2>
+
+  <form [formGroup]="form" (ngSubmit)="onSubmit()">
+    <div class="row">
+      <label>お名前</label>
+      <input formControlName="name" placeholder="山田 太郎" />
+      <small *ngIf="form.get('name')?.invalid && form.get('name')?.touched">
+        必須です（50文字以内）。
+      </small>
+    </div>
+
+    <div class="row">
+      <label>メール</label>
+      <input formControlName="email" placeholder="taro@example.com" />
+      <small *ngIf="form.get('email')?.invalid && form.get('email')?.touched">
+        メール形式で入力してください。
+      </small>
+    </div>
+
+    <div class="row">
+      <label>メッセージ</label>
+      <textarea formControlName="message" rows="5" placeholder="お問い合わせ内容を入力してください"></textarea>
+      <small *ngIf="form.get('message')?.invalid && form.get('message')?.touched">
+        必須です（500文字以内）。
+      </small>
+    </div>
+
+    <button type="submit" [disabled]="form.invalid">送信</button>
+  </form>
+
+  <div class="thanks" *ngIf="submitted">
+    <p>ありがとうございます！メッセージを受け付けました（デモ）。</p>
+  </div>
+</section>
