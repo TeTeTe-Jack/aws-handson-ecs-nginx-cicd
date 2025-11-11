@@ -1,0 +1,378 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Service Stack: Private VPC, VPC Endpoints, internal ALB (HTTPS), ECS (Fargate),
+  and Route53 Private Hosted Zone.
+
+Parameters:
+  SystemName:
+    Type: String
+    Default: demo
+    Description: Logical name prefix
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, stg, prod]
+    Description: Environment name
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: VPC CIDR
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.10.0/24
+    Description: Private Subnet 1 CIDR
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.11.0/24
+    Description: Private Subnet 2 CIDR
+
+  ContainerPort:
+    Type: Number
+    Default: 80
+    Description: Container listening port
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: Number of ECS tasks
+  TaskCpu:
+    Type: String
+    Default: '256'
+    AllowedValues: ['256','512','1024','2048','4096']
+    Description: Fargate task CPU units
+  TaskMemory:
+    Type: String
+    Default: '512'
+    AllowedValues: ['512','1024','2048','3072','4096','5120','6144','7168','8192']
+    Description: Fargate task memory (MiB)
+
+  HealthCheckPath:
+    Type: String
+    Default: /healthz
+    Description: ALB health check path
+
+  # HTTPS (ALB)
+  AcmCertificateArn:
+    Type: String
+    Description: ACM certificate ARN for the ALB HTTPS listener
+  AlbSslPolicy:
+    Type: String
+    Default: ELBSecurityPolicy-TLS13-1-2-Res-2021-06
+    Description: SSL policy for the ALB HTTPS listener
+
+  # Route53 Private Hosted Zone
+  PrivateHostedZoneName:
+    Type: String
+    Default: internal.demo.local
+    Description: Private hosted zone name (e.g., internal.example.local)
+  DnsRecordName:
+    Type: String
+    Default: app
+    Description: Record name to create (e.g., app.internal.example.local)
+
+  # Image to validate and deploy
+  AppImageUri:
+    Type: String
+    Description: 'Full ECR image URI to deploy (e.g., 123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/repo:tag or @sha256:...)'
+
+Mappings:
+  RegionAzHint:
+    ap-northeast-1:
+      Az1: ap-northeast-1a
+      Az2: ap-northeast-1c
+
+Resources:
+  # ------------------- Networking -------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub '${SystemName}-${Environment}-vpc' }]
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !FindInMap [RegionAzHint, !Ref "AWS::Region", Az1]
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Name, Value: !Sub '${SystemName}-${Environment}-private-az1' }]
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !FindInMap [RegionAzHint, !Ref "AWS::Region", Az2]
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Name, Value: !Sub '${SystemName}-${Environment}-private-az2' }]
+
+  RtPrivate1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub '${SystemName}-${Environment}-rt-private-az1' }]
+  RtPrivate2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub '${SystemName}-${Environment}-rt-private-az2' }]
+  RtPrivateAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RtPrivate1
+      SubnetId: !Ref PrivateSubnet1
+  RtPrivateAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RtPrivate2
+      SubnetId: !Ref PrivateSubnet2
+
+  # ------------------- Security Groups -------------------
+  AlbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the internal ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: !Ref VpcCidr }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: !Ref VpcCidr }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+
+  TaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ECS tasks
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSg
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+
+  VpceSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for VPC Interface Endpoints
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, SourceSecurityGroupId: !Ref TaskSg }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+
+  # ------------------- VPC Endpoints -------------------
+  VpceEcrApi:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.api'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VpceSg]
+
+  VpceEcrDkr:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.dkr'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VpceSg]
+
+  VpceLogs:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VpceSg]
+
+  VpceS3Gateway:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref RtPrivate1, !Ref RtPrivate2]
+
+  # ------------------- ALB / Listeners / Target Groups -------------------
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${SystemName}-${Environment}-alb'
+      Scheme: internal
+      Type: application
+      Subnets: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroups: [!Ref AlbSg]
+
+  Listener80:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig: { Protocol: HTTPS, Port: '443', StatusCode: HTTP_301 }
+
+  Listener443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates: [{ CertificateArn: !Ref AcmCertificateArn }]
+      SslPolicy: !Ref AlbSslPolicy
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TgBlue
+
+  TgBlue:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${SystemName}-${Environment}-tg-blue'
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+      HealthCheckPath: !Ref HealthCheckPath
+      Matcher: { HttpCode: '200,301,302' }
+
+  TgGreen:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${SystemName}-${Environment}-tg-green'
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+      HealthCheckPath: !Ref HealthCheckPath
+      Matcher: { HttpCode: '200,301,302' }
+
+  # ------------------- ECS Cluster / Task / Service (CodeDeploy) -------------------
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${SystemName}-${Environment}-cluster'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${SystemName}-${Environment}'
+      RetentionInDays: 30
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${SystemName}-${Environment}-ecsTaskExecutionRole'
+      Description: ECS task execution role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${SystemName}-${Environment}-ecsTaskRole'
+      Description: Application task role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: CheckAppImage
+    Properties:
+      Family: !Sub '${SystemName}-${Environment}-task'
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Ref AppImageUri
+          PortMappings: [{ ContainerPort: !Ref ContainerPort }]
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          HealthCheck:
+            Command: ['CMD-SHELL', !Sub 'curl -f http://localhost:${ContainerPort}${HealthCheckPath} || exit 1']
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener443
+    Properties:
+      ServiceName: !Sub '${SystemName}-${Environment}-svc'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount
+      DeploymentController: { Type: CODE_DEPLOY }
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref TaskSg]
+          Subnets: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      LoadBalancers:
+        - TargetGroupArn: !Ref TgBlue
+          ContainerName: app
+          ContainerPort: !Ref ContainerPort
+
+  # ------------------- Route53 Private Hosted Zone -------------------
+  PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref PrivateHostedZoneName
+      VPCs: [{ VPCId: !Ref VPC, VPCRegion: !Ref AWS::Region }]
+
+  AlbAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PrivateHostedZone
+      Name: !Sub '${DnsRecordName}.${PrivateHostedZoneName}'
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ALB.DNSName
+        HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+Outputs:
+  PrivateFQDN:
+    Value: !Sub '${DnsRecordName}.${PrivateHostedZoneName}'
+    Description: Private FQDN for HTTPS access within the VPC
+  AlbDNSName:
+    Value: !GetAtt ALB.DNSName
+    Description: Internal ALB DNS name
+  ClusterName:
+    Value: !Ref ECSCluster
+    Description: ECS cluster name
+  ServiceName:
+    Value: !Ref EcsService
+    Description: ECS service name
