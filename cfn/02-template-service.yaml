@@ -298,7 +298,6 @@ Resources:
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
-    DependsOn: CheckAppImage
     Properties:
       Family: !Sub '${SystemName}-${Environment}-task'
       Cpu: !Ref TaskCpu
