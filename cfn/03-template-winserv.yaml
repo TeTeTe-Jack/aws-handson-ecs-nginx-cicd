@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Windows Server 2025 (Base) for verification. Private VPC friendly: SSM Session Manager by default,
+  Optionally creates SSM Interface Endpoints (ssm, ec2messages, ssmmessages) if needed.
+  AMI follows latest via SSM public parameter.
+
+Parameters:
+  SystemName:
+    Type: String
+    Default: demo
+    Description: Logical name prefix
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, stg, prod]
+    Description: Environment name
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC ID to launch the instance into
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Private subnet ID where the instance and (optionally) VPC endpoints will be placed
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3a.small
+      - t3a.medium
+      - t3a.large
+    Description: EC2 instance type for Windows Server 2025 (small for lightweight verification)
+  VolumeSizeGiB:
+    Type: Number
+    Default: 30
+    MinValue: 30
+    MaxValue: 1024
+    Description: Root EBS volume size (GiB)
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: ''
+    Description: Optional key pair name (needed if you plan to RDP and decrypt Admin password)
+  CreateSsmEndpoints:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true','false']
+    Description: Create SSM/EC2Messages/SSMMessages Interface Endpoints in the same Subnet
+
+Mappings:
+  WinAmiParam:
+    Base:
+      Name: /aws/service/ami-windows-latest/Windows_Server-2025-English-Full-Base
+
+Conditions:
+  UseKeyPair: !Not [!Equals [!Ref KeyName, ""]]
+  CreateEndpoints: !Equals [!Ref CreateSsmEndpoints, 'true']
+
+Resources:
+  # Security Group for the instance
+  InstanceSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Windows test instance security group (RDP optional; SSM uses HTTPS to endpoints)
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+      Tags:
+        - { Key: Name, Value: !Sub '${SystemName}-${Environment}-win2025-sg' }
+
+  # (Optional) SG for Interface Endpoints
+  EndpointSg:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: Security group for SSM Interface Endpoints (allow 443 from instance)
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref InstanceSg
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: 0.0.0.0/0 }
+      Tags:
+        - { Key: Name, Value: !Sub '${SystemName}-${Environment}-vpce-ssm-sg' }
+
+  # (Optional) Interface Endpoints for SSM (if there is no NAT/IGW)
+  VpceSsm:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcId: !Ref VpcId
+      SubnetIds: [!Ref SubnetId]
+      SecurityGroupIds: [!Ref EndpointSg]
+      Tags:
+        - { Key: Name, Value: !Sub '${SystemName}-${Environment}-vpce-ssm' }
+
+  VpceEc2Messages:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcId: !Ref VpcId
+      SubnetIds: [!Ref SubnetId]
+      SecurityGroupIds: [!Ref EndpointSg]
+      Tags:
+        - { Key: Name, Value: !Sub '${SystemName}-${Environment}-vpce-ec2messages' }
+
+  VpceSsmMessages:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcId: !Ref VpcId
+      SubnetIds: [!Ref SubnetId]
+      SecurityGroupIds: [!Ref EndpointSg]
+      Tags:
+        - { Key: Name, Value: !Sub '${SystemName}-${Environment}-vpce-ssmmessages' }
+
+  # IAM role/profile for SSM
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${SystemName}-${Environment}-win2025-ssm-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - { Key: System, Value: !Ref SystemName }
+        - { Key: Env, Value: !Ref Environment }
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+      InstanceProfileName: !Sub '${SystemName}-${Environment}-win2025-ssm-profile'
+
+  # Windows Server 2025 EC2
+  WindowsInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          commands:
+            set-timezone:
+              command: 'tzutil /s "Tokyo Standard Time"'
+    Properties:
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      ImageId: 'ami-0e0811efc08b3f2aa'
+      InstanceType: !Ref InstanceType
+      SecurityGroupIds: [!Ref InstanceSg]
+      KeyName: !If [UseKeyPair, !Ref KeyName, !Ref "AWS::NoValue"]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSizeGiB
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - { Key: Name, Value: !Sub '${SystemName}-${Environment}-win2025' }
+        - { Key: System, Value: !Ref SystemName }
+        - { Key: Env, Value: !Ref Environment }
+
+Outputs:
+  InstanceId:
+    Value: !Ref WindowsInstance
+    Description: EC2 Instance ID
+  InstancePrivateIp:
+    Value: !GetAtt WindowsInstance.PrivateIp
+    Description: Private IP address of the Windows instance
+  InstanceSgId:
+    Value: !Ref InstanceSg
+    Description: Security Group ID attached to the instance
+  AmiParameterName:
+    Value: !FindInMap [WinAmiParam, Base, Name]
+    Description: SSM public parameter name used for AMI resolution
